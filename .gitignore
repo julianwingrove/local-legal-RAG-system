@@ -1,1 +1,14 @@
+# macOS
+.DS_Store
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ChromaDB (large, fully reproducible by running ingest.py)
 chroma_db/
+
+# Environment variables (if you ever add secrets)
+.env

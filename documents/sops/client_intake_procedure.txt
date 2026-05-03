@@ -1,0 +1,10 @@
+SOP-001: Client Intake Procedure
+Version: 1.0 | Effective: January 2025
+
+1. PURPOSE
+This SOP governs the intake of new clients at the firm.
+
+2. PROCEDURE
+2.1 Initial consultation must be booked within 3 business days of inquiry.
+2.2 A conflict of interest check must be completed before any information 
+    is received from the prospective client...

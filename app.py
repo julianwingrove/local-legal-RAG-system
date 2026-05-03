@@ -70,6 +70,8 @@ def load_engine():
     llm = Ollama(
         model="llama3.2:3b",
         request_timeout=180.0,
+        context_window=4096,
+        keep_alive="60m"
         system_prompt=SYSTEM_PROMPT
     )
 
@@ -116,10 +118,11 @@ def load_engine():
     # response_mode="tree_summarize": calls the LLM once using all 3 chunks together.
     #   The alternative (default "compact_and_refine") calls the LLM once PER chunk,
     #   which is 3x slower. tree_summarize is the right choice for an 8GB machine.
-    return index.as_query_engine(
+    return index.as_chat_engine(
         llm=llm,
+        chat_mode="context",
         similarity_top_k=3,
-        response_mode="tree_summarize"
+        response_mode=SYSTEM_PROMPT
     )
 
 
@@ -185,7 +188,7 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
             #   2. Searches ChromaDB for the 3 closest document chunks
             #   3. Sends those chunks + prompt to llama3.2:3b
             #   4. Returns the response object
-            response = query_engine.query(prompt)
+            response = query_engine.chat(prompt)
 
             # Convert the response object to a plain string for display.
             answer = str(response)

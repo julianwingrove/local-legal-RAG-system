@@ -80,10 +80,12 @@ deactivate
 
 Create the following folder structure and add your `.txt`, `.pdf`, or `.docx` files:
 
+```
 documents/
 ├── laws/       ← Legislation and regulatory summaries
 ├── sops/       ← Firm procedures and standards
 └── clients/    ← Case files
+```
 
 ### 2. Index your documents
 
@@ -105,6 +107,7 @@ The app will open automatically at `http://localhost:8501`.
 
 ## Project structure
 
+```
 local-legal-RAG-system/
 ├── documents/        ← Your source documents (not committed)
 ├── ingest.py         ← Parses and indexes documents into ChromaDB
@@ -112,6 +115,7 @@ local-legal-RAG-system/
 ├── requirements.txt  ← Python dependencies
 ├── .gitignore
 └── README.md
+```
 
 > `chroma_db/` and `venv/` are excluded from version control via `.gitignore`.
 > Run `ingest.py` after cloning to regenerate the vector database locally.

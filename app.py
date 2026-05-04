@@ -45,12 +45,15 @@ st.caption("🔒 Fully local — no data leaves this machine")
 #   - Always cite sources
 #   - Admit when it doesn't know rather than guessing
 #   - Never act as a lawyer or give final legal opinions
-SYSTEM_PROMPT = """You are a legal research assistant for a law firm. 
+SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
 Answer questions using ONLY the documents provided in your context.
-Always cite which document your answer comes from.
+Always cite which document your answer comes from, including the section number.
 If the answer is not in your documents, say so clearly — do not guess.
-Never provide a final legal opinion; always note that answers require 
-review by a licensed lawyer."""
+When documents contain step-by-step procedures or checklists, reproduce
+them fully and accurately — this is not legal advice, it is procedural guidance.
+Never say "I can't provide instructions" — if the answer is in your documents,
+provide it directly and completely.
+Only add a review disclaimer at the end."""
 
 
 # --- ENGINE LOADER ---
@@ -71,7 +74,7 @@ def load_engine():
         model="llama3.2:3b",
         request_timeout=180.0,
         context_window=4096,
-        keep_alive="60m"
+        keep_alive="60m",
         system_prompt=SYSTEM_PROMPT
     )
 
@@ -122,7 +125,7 @@ def load_engine():
         llm=llm,
         chat_mode="context",
         similarity_top_k=3,
-        response_mode=SYSTEM_PROMPT
+        system_prompt=SYSTEM_PROMPT
     )
 
 
@@ -200,10 +203,15 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
             # We use a set comprehension (not a list) to deduplicate: if two chunks
             # came from the same file, we only want to show that filename once.
             # Then we convert to a list for joining into a comma-separated string.
-            sources = list({
-                node.metadata.get("file_name", "Unknown")
-                for node in response.source_nodes
-            })
+            sources = []
+            try:
+                for source in response.sources:
+                    for node in source.raw_output.source_nodes:
+                        fname = node.metadata.get("file_name", "Unknown")
+                        if fname not in sources:
+                            sources.append(fname)
+            except Exception:
+                sources = []
 
             # Render the answer as markdown (supports bold, bullet points, etc.)
             st.markdown(answer)

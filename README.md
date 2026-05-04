@@ -60,6 +60,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+When working in different branches, you must install the requirements again.
+
 If you already have the python venv set up with the requirements, only run:
 
 ```bash

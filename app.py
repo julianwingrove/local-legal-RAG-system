@@ -1,50 +1,20 @@
-# app.py — The chat interface
-# This script runs the Streamlit web app that the lawyer interacts with.
-# It loads the indexed documents from ChromaDB and uses the local LLM
-# to answer questions based on what was indexed by ingest.py.
+# app.py — Legal AI Assistant with multi-conversation sidebar
 
-# --- IMPORTS ---
-
-import streamlit as st  # Streamlit turns this Python script into a web UI automatically.
-                        # Every time the user does something (sends a message, etc.),
-                        # Streamlit re-runs the entire script from top to bottom.
-
-import chromadb  # The local vector database where your indexed documents live.
-
-# VectorStoreIndex: the LlamaIndex object that wraps your ChromaDB index
-#                   and knows how to search it.
-# StorageContext: tells LlamaIndex where data is stored (in our case, ChromaDB).
+import uuid
+import streamlit as st
+import chromadb
 from llama_index.core import VectorStoreIndex, StorageContext
-
-# Ollama: the connector that lets LlamaIndex talk to your locally running LLM.
 from llama_index.llms.ollama import Ollama
-
-# OllamaEmbedding: the connector for the local embedding model (nomic-embed-text).
-# Must be the same model used in ingest.py — mixing models breaks similarity search.
 from llama_index.embeddings.ollama import OllamaEmbedding
-
-# ChromaVectorStore: the bridge/adapter between LlamaIndex and ChromaDB.
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
+# layout="wide" gives more horizontal space for the sidebar + chat layout
+st.set_page_config(
+    page_title="Legal AI Assistant",
+    page_icon="⚖️",
+    layout="wide"
+)
 
-# --- PAGE CONFIGURATION ---
-# These must be the first Streamlit calls in the script.
-# page_title sets the browser tab title, page_icon sets the favicon.
-st.set_page_config(page_title="Legal AI Assistant", page_icon="⚖️")
-st.title("⚖️ Legal AI Assistant")
-st.caption("🔒 Fully local — no data leaves this machine")
-
-
-# --- SYSTEM PROMPT ---
-# This is the instruction set given to the LLM before every conversation.
-# It defines the AI's role, constraints, and behaviour.
-# This is one of the most important parts of the app — a well-written system
-# prompt is what prevents the model from hallucinating or going off-script.
-# Key rules enforced here:
-#   - Only answer from the provided documents (no general knowledge)
-#   - Always cite sources
-#   - Admit when it doesn't know rather than guessing
-#   - Never act as a lawyer or give final legal opinions
 SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
 Answer questions using ONLY the documents provided in your context.
 Always cite which document your answer comes from, including the section number.
@@ -56,71 +26,35 @@ provide it directly and completely.
 Only add a review disclaimer at the end."""
 
 
-# --- ENGINE LOADER ---
-# @st.cache_resource is a Streamlit decorator that runs this function ONCE
-# and then caches (stores) the result in memory for the entire session.
-# Without it, Streamlit would reload the LLM and reconnect to ChromaDB on
-# every single message — adding 10-15 seconds of delay each time.
-# This is why the first message is slower: the engine is loading.
-# Every message after that reuses the already-loaded engine instantly.
+# --- INDEX LOADER ---
+# Load the ChromaDB index once and cache it — shared across all conversations.
+# We separate this from the chat engine so each conversation can have its own
+# engine instance (with its own memory) while sharing the same document index.
 @st.cache_resource
-def load_engine():
-    # Initialise the local LLM via Ollama.
-    # model: which model to use (must already be pulled via `ollama pull`)
-    # request_timeout: how many seconds to wait before giving up on a response.
-    #                  180s is generous — reduce to 60s once you're happy with speed.
-    # system_prompt: the instruction set defined above, sent before every query.
+def load_index():
+    embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+    chroma_client = chromadb.PersistentClient(path="./chroma_db")
+    collection = chroma_client.get_or_create_collection("legal_docs")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    return VectorStoreIndex.from_vector_store(
+        vector_store,
+        embed_model=embed_model
+    )
+
+
+# --- CHAT ENGINE FACTORY ---
+# Creates a fresh chat engine with its own memory buffer.
+# Called once per new conversation so each conversation tracks
+# its own context independently from all others.
+def create_chat_engine(index):
     llm = Ollama(
         model="llama3.2:3b",
         request_timeout=180.0,
-        context_window=4096,
+        context_window=3072,
         keep_alive="60m",
         system_prompt=SYSTEM_PROMPT
     )
-
-    # Initialise the same embedding model used during ingestion.
-    # This is critical: the query must be embedded with the same model
-    # that was used to embed the documents, otherwise the vectors won't
-    # be comparable and similarity search will return garbage results.
-    embed_model = OllamaEmbedding(model_name="nomic-embed-text")
-
-    # Connect to the ChromaDB database on disk (created by ingest.py).
-    # PersistentClient reads from the ./chroma_db folder — it does NOT
-    # load all vectors into memory. It queries the database file on demand.
-    chroma_client = chromadb.PersistentClient(path="./chroma_db")
-
-    # Connect to the specific collection created during ingestion.
-    # get_or_create_collection: if "legal_docs" exists, connect to it.
-    # If it doesn't exist (i.e. ingest.py hasn't been run yet), it creates
-    # an empty one — which is why queries would return no results, not an error.
-    collection = chroma_client.get_or_create_collection("legal_docs")
-
-    # Wrap the ChromaDB collection in LlamaIndex's adapter.
-    vector_store = ChromaVectorStore(chroma_collection=collection)
-
-    # Tell LlamaIndex to use ChromaDB as its storage backend.
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-    # Load the existing index from ChromaDB — this does NOT re-embed anything.
-    # It simply points LlamaIndex at the already-computed vectors in ChromaDB
-    # so it can search them. This is much faster than from_documents() in ingest.py.
-    index = VectorStoreIndex.from_vector_store(
-        vector_store, embed_model=embed_model
-    )
-
-    # Create the query engine — the object that handles the full RAG pipeline:
-    #   1. Embed the user's question using embed_model
-    #   2. Search ChromaDB for the top 3 most similar document chunks
-    #   3. Send those chunks + the question to the LLM
-    #   4. Return the LLM's answer along with which chunks it used (source_nodes)
-    #
-    # similarity_top_k=3: retrieve the 3 closest document chunks.
-    #   Higher = more context but slower and more memory pressure.
-    #   Lower = faster but may miss relevant information.
-    #
-    # response_mode="tree_summarize": calls the LLM once using all 3 chunks together.
-    #   The alternative (default "compact_and_refine") calls the LLM once PER chunk,
-    #   which is 3x slower. tree_summarize is the right choice for an 8GB machine.
     return index.as_chat_engine(
         llm=llm,
         chat_mode="context",
@@ -129,80 +63,123 @@ def load_engine():
     )
 
 
-# --- ENGINE INITIALISATION ---
-# Attempt to load the engine when the app starts.
-# If it fails (e.g. ChromaDB is empty because ingest.py hasn't been run,
-# or Ollama isn't running), show a friendly error and stop the app
-# rather than crashing with a raw Python traceback.
+# --- NEW CONVERSATION ---
+# Creates a new conversation entry in session_state with:
+#   - a unique ID (uuid)
+#   - a default name that updates to the first message after sending
+#   - an empty message list for display
+#   - its own fresh chat engine instance with isolated memory
+def new_conversation(index):
+    conv_id = str(uuid.uuid4())
+    st.session_state.conversations[conv_id] = {
+        "name": "New chat",
+        "messages": [],
+        "engine": create_chat_engine(index)
+    }
+    st.session_state.active_conv_id = conv_id
+
+
+# --- LOAD INDEX ---
 try:
-    query_engine = load_engine()
+    index = load_index()
 except Exception as e:
-    st.error(f"Failed to load engine. Have you run `python ingest.py` first? \n\nError: {e}")
-    st.stop()  # Halts the rest of the script — nothing below this runs.
+    st.error(f"Failed to load index. Have you run `python ingest.py` first?\n\nError: {e}")
+    st.stop()
 
 
-# --- CHAT HISTORY ---
-# st.session_state is Streamlit's way of persisting data across re-runs.
-# Because Streamlit re-runs the whole script on every interaction,
-# regular Python variables would reset to empty on each message.
-# session_state survives re-runs for the duration of the browser session.
-#
-# Here we initialise an empty list the first time the app loads.
-# On every subsequent re-run, this block is skipped because "messages"
-# already exists in session_state.
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# --- SESSION STATE INITIALISATION ---
+# Initialise conversations dict and active conversation on first run.
+# On subsequent Streamlit re-runs these already exist and are skipped.
+if "conversations" not in st.session_state:
+    st.session_state.conversations = {}
+
+if "active_conv_id" not in st.session_state:
+    st.session_state.active_conv_id = None
+
+# Always ensure at least one conversation exists
+if not st.session_state.conversations:
+    new_conversation(index)
 
 
-# --- DISPLAY CHAT HISTORY ---
-# On every re-run, replay all previous messages to the screen.
-# This is what makes it look like a continuous conversation —
-# Streamlit doesn't natively remember what's on screen, so we
-# re-render the full history from session_state each time.
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):  # "user" or "assistant" — controls the avatar
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("⚖️ Legal AI")
+    st.caption("🔒 Fully local")
+
+    # New chat button — creates a fresh conversation and switches to it
+    if st.button("+ New chat", use_container_width=True):
+        new_conversation(index)
+        st.rerun()
+
+    st.divider()
+
+    # List all conversations — most recent at the top
+    # Each conversation gets a select button and a delete button side by side
+    for conv_id in reversed(list(st.session_state.conversations.keys())):
+        conv = st.session_state.conversations[conv_id]
+        is_active = conv_id == st.session_state.active_conv_id
+
+        # Two columns: conversation name button + delete button
+        col1, col2 = st.columns([5, 1])
+
+        with col1:
+            # Highlighted differently if this is the active conversation
+            if st.button(
+                conv["name"],
+                key=f"select_{conv_id}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary"
+            ):
+                st.session_state.active_conv_id = conv_id
+                st.rerun()
+
+        with col2:
+            if st.button("✕", key=f"delete_{conv_id}", use_container_width=True):
+                del st.session_state.conversations[conv_id]
+                # If no conversations left, create a fresh one automatically
+                if not st.session_state.conversations:
+                    new_conversation(index)
+                # If we deleted the active one, switch to the most recent remaining
+                elif st.session_state.active_conv_id == conv_id:
+                    st.session_state.active_conv_id = list(
+                        st.session_state.conversations.keys()
+                    )[-1]
+                st.rerun()
+
+
+# --- MAIN CHAT AREA ---
+st.title("⚖️ Legal AI Assistant")
+st.caption("🔒 Fully local — no data leaves this machine")
+
+# Get the active conversation and its engine
+active_conv = st.session_state.conversations[st.session_state.active_conv_id]
+query_engine = active_conv["engine"]
+
+# Replay message history for this conversation
+for msg in active_conv["messages"]:
+    with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Only show the sources line if this message had sources attached.
-        # User messages don't have sources; only assistant responses do.
         if "sources" in msg and msg["sources"]:
             st.caption(f"📎 Sources: {', '.join(msg['sources'])}")
 
-
-# --- CHAT INPUT & RESPONSE ---
-# st.chat_input renders the text box at the bottom of the screen.
-# The := (walrus operator) both assigns the value AND checks if it's non-empty.
-# This entire block only runs when the user has typed something and pressed Enter.
+# Chat input
 if prompt := st.chat_input("Ask a question about firm procedures or Ontario law..."):
 
-    # Save the user's message to history so it persists on re-runs.
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Auto-name the conversation from the first message, truncated to 35 chars
+    if len(active_conv["messages"]) == 0:
+        active_conv["name"] = prompt[:35] + "..." if len(prompt) > 35 else prompt
 
-    # Display the user's message in the chat UI immediately.
+    active_conv["messages"].append({"role": "user", "content": prompt})
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Display the assistant's response in its own chat bubble.
     with st.chat_message("assistant"):
-        # st.spinner shows a loading animation while the LLM is thinking.
         with st.spinner("Searching documents and generating response..."):
-
-            # This is the core RAG call. It:
-            #   1. Embeds `prompt` into a vector
-            #   2. Searches ChromaDB for the 3 closest document chunks
-            #   3. Sends those chunks + prompt to llama3.2:3b
-            #   4. Returns the response object
             response = query_engine.chat(prompt)
-
-            # Convert the response object to a plain string for display.
             answer = str(response)
 
-            # Extract the filenames of the source documents that were retrieved.
-            # response.source_nodes is a list of the chunks that were used.
-            # Each node has a metadata dict containing info from ingestion —
-            # including "file_name" which was automatically set by SimpleDirectoryReader.
-            # We use a set comprehension (not a list) to deduplicate: if two chunks
-            # came from the same file, we only want to show that filename once.
-            # Then we convert to a list for joining into a comma-separated string.
+            # Extract source filenames from chat engine response
             sources = []
             try:
                 for source in response.sources:
@@ -213,21 +190,12 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
             except Exception:
                 sources = []
 
-            # Render the answer as markdown (supports bold, bullet points, etc.)
             st.markdown(answer)
-
-            # Show which documents the answer was drawn from.
             if sources:
                 st.caption(f"📎 Sources: {', '.join(sources)}")
-
-            # Always show this disclaimer — it's a professional and ethical requirement.
-            # No AI output should ever be treated as final legal advice.
             st.caption("⚠️ AI-assisted research only. Must be reviewed by a licensed lawyer.")
 
-    # Save the assistant's response to history.
-    # We store sources alongside the content so they can be re-displayed
-    # when the chat history is replayed on the next Streamlit re-run.
-    st.session_state.messages.append({
+    active_conv["messages"].append({
         "role": "assistant",
         "content": answer,
         "sources": sources

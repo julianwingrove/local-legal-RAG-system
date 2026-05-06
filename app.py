@@ -8,12 +8,47 @@ from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
+# --- CREDENTIALS ---
+# Hardcoded for PoC only. Never do this in production.
+CREDENTIALS = {
+    "admin": "legal123",
+}
+
+def check_login(username, password):
+    return CREDENTIALS.get(username) == password
+
 # layout="wide" gives more horizontal space for the sidebar + chat layout
 st.set_page_config(
     page_title="Legal AI Assistant",
     page_icon="⚖️",
     layout="wide"
 )
+
+# --- LOGIN GATE ---
+# If not logged in, show the login screen and stop the rest of the app
+# from rendering. Once authenticated, session_state.logged_in stays
+# True for the duration of the session so the gate is skipped on re-runs.
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    st.title("⚖️ Legal AI Assistant")
+    st.subheader("Sign in to continue")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+
+    if submitted:
+        if check_login(username, password):
+            st.session_state.logged_in = True
+            st.session_state.username = username
+            st.rerun()
+        else:
+            st.error("Incorrect username or password.")
+
+    st.stop()
 
 SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
 Answer questions using ONLY the documents provided in your context.
@@ -58,7 +93,7 @@ def create_chat_engine(index):
     return index.as_chat_engine(
         llm=llm,
         chat_mode="context",
-        similarity_top_k=3,
+        similarity_top_k=10,
         system_prompt=SYSTEM_PROMPT
     )
 
@@ -105,6 +140,12 @@ if not st.session_state.conversations:
 with st.sidebar:
     st.title("⚖️ Legal AI")
     st.caption("🔒 Fully local")
+
+    # Show who is logged in and a logout button
+    st.caption(f"Signed in as **{st.session_state.username}**")
+    if st.button("Sign out", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
     # New chat button — creates a fresh conversation and switches to it
     if st.button("+ New chat", use_container_width=True):

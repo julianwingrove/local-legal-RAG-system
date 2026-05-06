@@ -6,6 +6,11 @@
 # chromadb is the local vector database we use to store and search embeddings
 import chromadb
 
+import fitz  # pymupdf
+import os
+from llama_index.core import Document
+from llama_index.core.node_parser import SentenceSplitter
+
 # SimpleDirectoryReader: scans a folder and loads all documents into memory
 # VectorStoreIndex: the main object that coordinates embedding + storage
 # StorageContext: tells LlamaIndex *where* to store the vectors (in our case, ChromaDB)
@@ -29,15 +34,43 @@ print("🔍 Loading documents...")
 # things like .DS_Store, .gitignore, or any other files in that folder.
 # .load_data() reads the content of every matched file into memory as
 # a list of Document objects — one per file (or per page for PDFs).
-documents = SimpleDirectoryReader(
-    "./documents",
-    recursive=True,
-    required_exts=[".txt", ".pdf", ".docx"]
-).load_data()
+documents = []
 
-# This tells you how many document chunks were loaded — useful sanity check.
-# If this number is 0, something is wrong with the folder path or file types.
-print(f"✅ Loaded {len(documents)} document chunks")
+for root, dirs, files in os.walk("./documents"):
+    for filename in files:
+        filepath = os.path.join(root, filename)
+        ext = os.path.splitext(filename)[1].lower()
+
+        try:
+            if ext == ".pdf":
+                # Use pymupdf for robust PDF parsing
+                doc = fitz.open(filepath)
+                text = ""
+                for page in doc:
+                    text += page.get_text()
+                doc.close()
+                if text.strip():
+                    documents.append(Document(
+                        text=text,
+                        metadata={"file_name": filename, "file_path": filepath}
+                    ))
+                else:
+                    print(f"⚠️  No text extracted from {filename} — skipping")
+
+            elif ext in [".txt", ".docx"]:
+                # Use SimpleDirectoryReader for non-PDF files
+                from llama_index.core import SimpleDirectoryReader
+                docs = SimpleDirectoryReader(
+                    input_files=[filepath]
+                ).load_data()
+                for d in docs:
+                    d.metadata["file_name"] = filename
+                documents.extend(docs)
+
+        except Exception as e:
+            print(f"⚠️  Failed to load {filename}: {e}")
+
+print(f"✅ Loaded {len(documents)} documents")
 
 
 # --- STEP 2: SET UP THE VECTOR STORE ---
@@ -87,6 +120,10 @@ index = VectorStoreIndex.from_documents(
     documents,
     storage_context=storage_context,
     embed_model=embed_model,
+    transformations=[SentenceSplitter(
+        chunk_size=512,        # max tokens per chunk
+        chunk_overlap=50       # overlap between chunks for context continuity
+    )],
     show_progress=True
 )
 

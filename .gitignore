@@ -12,3 +12,6 @@ chroma_db/
 
 # Environment variables (if you ever add secrets)
 .env
+
+# Documents (not committed — add your own locally)
+documents/

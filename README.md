@@ -1,10 +1,10 @@
 # Legal AI RAG System — Local PoC
 
-A fully local Retrieval-Augmented Generation (RAG) system that lets you 
-query a knowledge base of legal documents, firm SOPs, and case files using 
+A fully local Retrieval-Augmented Generation (RAG) system that lets you
+query a knowledge base of legal documents, firm SOPs, and case files using
 a locally hosted LLM. No data leaves your machine.
 
-Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai), 
+Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai),
 [ChromaDB](https://www.trychroma.com), and [Streamlit](https://streamlit.io).
 
 ---
@@ -26,7 +26,7 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
 
 ---
 
-## Setup
+## First-time setup
 
 ### 1. Install and start Ollama
 
@@ -60,50 +60,67 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-When working in different branches, you must install the requirements again.
+### 4. Add your documents
 
-If you already have the python venv set up with the requirements, only run:
-
-```bash
-source venv/bin/activate
-```
-
-To exit the venv, run:
-
-```bash
-deactivate
-```
-
----
-
-## Running the app
-
-### 1. Add your documents
-
-Create the following folder structure and add your `.txt`, `.pdf`, or `.docx` files:
+Add your `.txt`, `.pdf`, or `.docx` files to the documents folder.
+Subfolders are supported and recommended for organisation:
 
 ```
 documents/
-├── laws/       ← Legislation and regulatory summaries
-├── sops/       ← Firm procedures and standards
-└── clients/    ← Case files
+├── laws/
+│   ├── federal/        ← Federal legislation
+│   └── ontario/        ← Ontario statutes and regulations
+├── sops/               ← Firm procedures and standards
+└── clients/            ← Case files
 ```
 
-### 2. Index your documents
+> PDFs must be digital (text-selectable) not scanned images.
+> To test, try highlighting and copying text in Preview.
+> If you cannot select text, the PDF cannot be parsed.
+
+### 5. Index your documents
+
+Ollama must be running before ingestion. Then:
 
 ```bash
 python ingest.py
 ```
 
-Re-run this any time you add or update documents.
+This may take several minutes depending on the size of your document library.
+Re-run any time you add or update documents.
 
-### 3. Launch the app
+---
 
+## Daily startup
+
+**Terminal tab 1 — start Ollama:**
 ```bash
+ollama serve
+```
+
+**Terminal tab 2 — start the app:**
+```bash
+cd local-legal-RAG-system
+source venv/bin/activate
 streamlit run app.py
 ```
 
 The app will open automatically at `http://localhost:8501`.
+
+> If you are using VS Code, the virtual environment activates automatically
+> when you open a new terminal in the project folder.
+
+---
+
+## Login
+
+The app requires a username and password. Default credentials:
+
+| Username | Password |
+|----------|----------|
+| admin | legal123 |
+
+To add or change credentials, update the `CREDENTIALS` dictionary in `app.py`.
 
 ---
 
@@ -124,9 +141,21 @@ local-legal-RAG-system/
 
 ---
 
+## Venv reference
+
+| Command | When to use |
+|---------|-------------|
+| `source venv/bin/activate` | Start of every session |
+| `deactivate` | When you are done working |
+| `pip install -r requirements.txt` | First time setup only, or after pulling changes that update requirements.txt |
+| `pip freeze > requirements.txt` | After installing any new package |
+
+---
+
 ## Notes
 
 - Model: `llama3.2:3b` — approximately 2GB download, runs on 8GB unified memory
-- This is a proof-of-concept. Do not use with real regulated data (PHI, PII, 
+- Ollama must be running before launching the app or running ingestion
+- This is a proof-of-concept. Do not use with real regulated data (PHI, PII,
   client files) without a production-grade, air-gapped deployment
 - All AI responses should be reviewed by a licensed lawyer before being acted upon

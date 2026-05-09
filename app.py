@@ -1,12 +1,24 @@
-# app.py — Legal AI Assistant with multi-conversation sidebar
+# app.py — Legal AI Assistant with multi-category query router and chat memory
 
 import uuid
 import streamlit as st
 import chromadb
+
 from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import get_response_synthesizer
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
+
+st.set_page_config(
+    page_title="Legal AI Assistant",
+    page_icon="⚖️",
+    layout="wide"
+)
+
 
 # --- CREDENTIALS ---
 # Hardcoded for PoC only. Never do this in production.
@@ -17,17 +29,21 @@ CREDENTIALS = {
 def check_login(username, password):
     return CREDENTIALS.get(username) == password
 
-# layout="wide" gives more horizontal space for the sidebar + chat layout
-st.set_page_config(
-    page_title="Legal AI Assistant",
-    page_icon="⚖️",
-    layout="wide"
-)
+
+SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
+Answer questions using ONLY the documents provided in your context.
+Always cite which document your answer comes from, including the section number.
+If the answer is not in your documents, say so clearly — do not guess.
+When documents contain step-by-step procedures or checklists, reproduce
+them fully and accurately — this is not legal advice, it is procedural guidance.
+Never say "I can't provide instructions" — if the answer is in your documents,
+provide it directly and completely.
+Never say a document is not in your context if it appears in your sources.
+If a procedure is in your sources, reproduce its steps in full.
+Only add a review disclaimer at the end."""
+
 
 # --- LOGIN GATE ---
-# If not logged in, show the login screen and stop the rest of the app
-# from rendering. Once authenticated, session_state.logged_in stays
-# True for the duration of the session so the gate is skipped on re-runs.
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -50,21 +66,53 @@ if not st.session_state.logged_in:
 
     st.stop()
 
-SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
-Answer questions using ONLY the documents provided in your context.
-Always cite which document your answer comes from, including the section number.
-If the answer is not in your documents, say so clearly — do not guess.
-When documents contain step-by-step procedures or checklists, reproduce
-them fully and accurately — this is not legal advice, it is procedural guidance.
-Never say "I can't provide instructions" — if the answer is in your documents,
-provide it directly and completely.
-Only add a review disclaimer at the end."""
+
+# --- MULTI-CATEGORY RETRIEVER ---
+# Searches laws, SOPs, and client files independently and combines results.
+# Each category gets top_k_per_category slots — no category can crowd out another.
+# This means a cross-category question always gets relevant chunks from all three.
+class MultiCategoryRetriever:
+    def __init__(self, index, top_k_per_category=10):
+        self.retrievers = {
+            "law": VectorIndexRetriever(
+                index=index,
+                similarity_top_k=top_k_per_category,
+                filters=MetadataFilters(filters=[
+                    ExactMatchFilter(key="category", value="law")
+                ])
+            ),
+            "sop": VectorIndexRetriever(
+                index=index,
+                similarity_top_k=top_k_per_category,
+                filters=MetadataFilters(filters=[
+                    ExactMatchFilter(key="category", value="sop")
+                ])
+            ),
+            "client": VectorIndexRetriever(
+                index=index,
+                similarity_top_k=top_k_per_category,
+                filters=MetadataFilters(filters=[
+                    ExactMatchFilter(key="category", value="client")
+                ])
+            ),
+        }
+
+    def retrieve(self, query_str):
+        # Query all three categories and combine results.
+        # 5 chunks per category = 15 total chunks sent to the LLM.
+        all_nodes = []
+        for category, retriever in self.retrievers.items():
+            try:
+                nodes = retriever.retrieve(query_str)
+                all_nodes.extend(nodes)
+            except Exception as e:
+                print(f"⚠️  Retriever failed for {category}: {e}")
+        return all_nodes
 
 
 # --- INDEX LOADER ---
-# Load the ChromaDB index once and cache it — shared across all conversations.
-# We separate this from the chat engine so each conversation can have its own
-# engine instance (with its own memory) while sharing the same document index.
+# Loads ChromaDB index once and caches it for the session.
+# All conversations share the same index — only the query engines differ.
 @st.cache_resource
 def load_index():
     embed_model = OllamaEmbedding(model_name="nomic-embed-text")
@@ -78,11 +126,12 @@ def load_index():
     )
 
 
-# --- CHAT ENGINE FACTORY ---
-# Creates a fresh chat engine with its own memory buffer.
-# Called once per new conversation so each conversation tracks
-# its own context independently from all others.
-def create_chat_engine(index):
+# --- QUERY ENGINE FACTORY ---
+# Creates a RetrieverQueryEngine using the MultiCategoryRetriever.
+# Each conversation gets its own engine instance so they stay independent.
+# We use tree_summarize for a single LLM call per query — faster and
+# more memory-efficient than the default refine mode on 8GB.
+def create_query_engine(index):
     llm = Ollama(
         model="llama3.2:3b",
         request_timeout=180.0,
@@ -90,26 +139,52 @@ def create_chat_engine(index):
         keep_alive="60m",
         system_prompt=SYSTEM_PROMPT
     )
-    return index.as_chat_engine(
+
+    retriever = MultiCategoryRetriever(index, top_k_per_category=5)
+
+    return RetrieverQueryEngine.from_args(
+        retriever=retriever,
         llm=llm,
-        chat_mode="context",
-        similarity_top_k=10,
-        system_prompt=SYSTEM_PROMPT
+        response_synthesizer=get_response_synthesizer(
+            llm=llm,
+            response_mode="tree_summarize"
+        )
     )
 
 
+# --- CHAT MEMORY ---
+# Instead of relying on the chat engine to manage memory,
+# we inject the last few exchanges directly into each prompt.
+# This is more reliable with small models because it avoids
+# the condensation step that confuses llama3.2:3b.
+# We keep the last 3 exchanges (6 messages) to stay within
+# the 3072 token context window comfortably.
+def build_prompt_with_history(prompt, messages, max_exchanges=3):
+    # Grab the last N user/assistant pairs (excluding the current message)
+    recent = messages[-(max_exchanges * 2):]
+
+    if not recent:
+        return prompt
+
+    history_str = ""
+    for msg in recent:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        # Truncate long messages to avoid blowing the context window
+        content = msg["content"][:300] + "..." if len(msg["content"]) > 300 else msg["content"]
+        history_str += f"{role}: {content}\n"
+
+    return f"""Previous conversation:
+{history_str}
+Current question: {prompt}"""
+
+
 # --- NEW CONVERSATION ---
-# Creates a new conversation entry in session_state with:
-#   - a unique ID (uuid)
-#   - a default name that updates to the first message after sending
-#   - an empty message list for display
-#   - its own fresh chat engine instance with isolated memory
 def new_conversation(index):
     conv_id = str(uuid.uuid4())
     st.session_state.conversations[conv_id] = {
         "name": "New chat",
         "messages": [],
-        "engine": create_chat_engine(index)
+        "engine": create_query_engine(index)
     }
     st.session_state.active_conv_id = conv_id
 
@@ -122,16 +197,13 @@ except Exception as e:
     st.stop()
 
 
-# --- SESSION STATE INITIALISATION ---
-# Initialise conversations dict and active conversation on first run.
-# On subsequent Streamlit re-runs these already exist and are skipped.
+# --- SESSION STATE ---
 if "conversations" not in st.session_state:
     st.session_state.conversations = {}
 
 if "active_conv_id" not in st.session_state:
     st.session_state.active_conv_id = None
 
-# Always ensure at least one conversation exists
 if not st.session_state.conversations:
     new_conversation(index)
 
@@ -140,31 +212,25 @@ if not st.session_state.conversations:
 with st.sidebar:
     st.title("⚖️ Legal AI")
     st.caption("🔒 Fully local")
-
-    # Show who is logged in and a logout button
     st.caption(f"Signed in as **{st.session_state.username}**")
+
     if st.button("Sign out", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
-    # New chat button — creates a fresh conversation and switches to it
     if st.button("+ New chat", use_container_width=True):
         new_conversation(index)
         st.rerun()
 
     st.divider()
 
-    # List all conversations — most recent at the top
-    # Each conversation gets a select button and a delete button side by side
     for conv_id in reversed(list(st.session_state.conversations.keys())):
         conv = st.session_state.conversations[conv_id]
         is_active = conv_id == st.session_state.active_conv_id
 
-        # Two columns: conversation name button + delete button
         col1, col2 = st.columns([5, 1])
 
         with col1:
-            # Highlighted differently if this is the active conversation
             if st.button(
                 conv["name"],
                 key=f"select_{conv_id}",
@@ -177,10 +243,8 @@ with st.sidebar:
         with col2:
             if st.button("✕", key=f"delete_{conv_id}", use_container_width=True):
                 del st.session_state.conversations[conv_id]
-                # If no conversations left, create a fresh one automatically
                 if not st.session_state.conversations:
                     new_conversation(index)
-                # If we deleted the active one, switch to the most recent remaining
                 elif st.session_state.active_conv_id == conv_id:
                     st.session_state.active_conv_id = list(
                         st.session_state.conversations.keys()
@@ -192,7 +256,6 @@ with st.sidebar:
 st.title("⚖️ Legal AI Assistant")
 st.caption("🔒 Fully local — no data leaves this machine")
 
-# Get the active conversation and its engine
 active_conv = st.session_state.conversations[st.session_state.active_conv_id]
 query_engine = active_conv["engine"]
 
@@ -206,7 +269,7 @@ for msg in active_conv["messages"]:
 # Chat input
 if prompt := st.chat_input("Ask a question about firm procedures or Ontario law..."):
 
-    # Auto-name the conversation from the first message, truncated to 35 chars
+    # Auto-name conversation from first message
     if len(active_conv["messages"]) == 0:
         active_conv["name"] = prompt[:35] + "..." if len(prompt) > 35 else prompt
 
@@ -217,19 +280,23 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
 
     with st.chat_message("assistant"):
         with st.spinner("Searching documents and generating response..."):
-            response = query_engine.chat(prompt)
+
+            # Inject recent chat history into the prompt before querying.
+            # This gives the model memory of the conversation without
+            # relying on the chat engine's condensation step.
+            augmented_prompt = build_prompt_with_history(
+                prompt,
+                active_conv["messages"][:-1]  # exclude the message just appended
+            )
+
+            response = query_engine.query(augmented_prompt)
             answer = str(response)
 
-            # Extract source filenames from chat engine response
-            sources = []
-            try:
-                for source in response.sources:
-                    for node in source.raw_output.source_nodes:
-                        fname = node.metadata.get("file_name", "Unknown")
-                        if fname not in sources:
-                            sources.append(fname)
-            except Exception:
-                sources = []
+            # Extract source filenames from retrieved nodes
+            sources = list({
+                node.metadata.get("file_name", "Unknown")
+                for node in response.source_nodes
+            })
 
             st.markdown(answer)
             if sources:

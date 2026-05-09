@@ -24,7 +24,6 @@ st.set_page_config(
 # Hardcoded for PoC only. Never do this in production.
 CREDENTIALS = {
     "admin": "legal123",
-    "julian": "password"
 }
 
 def check_login(username, password):

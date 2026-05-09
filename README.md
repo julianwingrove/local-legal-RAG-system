@@ -22,6 +22,8 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
 ---
 
 ## Architecture
+
+```
 Your question + recent chat history
 ↓
 Multi-category query router
@@ -33,6 +35,7 @@ Multi-category query router
 Combined results (up to 20 chunks)
 ↓
 LLM generates cited answer
+```
 
 Each category is searched independently so no category can crowd out another.
 A question spanning multiple categories (e.g. legislation + SOP + client file)

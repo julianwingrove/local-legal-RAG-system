@@ -38,12 +38,18 @@ When documents contain step-by-step procedures or checklists, reproduce
 them fully and accurately — this is not legal advice, it is procedural guidance.
 Never say "I can't provide instructions" — if the answer is in your documents,
 provide it directly and completely.
-Never say a document is not in your context if it appears in your sources.
-If a procedure is in your sources, reproduce its steps in full.
-Only add a review disclaimer at the end."""
+Never say a document is not in your context if its filename appears in your sources.
+Never reference people, cases, or documents not present in your current sources.
+If a case file is in your sources, summarise it fully and accurately.
+Only add a review disclaimer at the end.
+When a case file contains the word URGENT or mentions days remaining
+to a limitation period, always lead your answer with that information
+before anything else."""
 
 
 # --- LOGIN GATE ---
+# Renders the login form and blocks the rest of the app until authenticated.
+# session_state.logged_in persists for the duration of the browser session.
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -69,28 +75,29 @@ if not st.session_state.logged_in:
 
 # --- MULTI-CATEGORY RETRIEVER ---
 # Searches laws, SOPs, and client files independently and combines results.
-# Each category gets top_k_per_category slots — no category can crowd out another.
-# This means a cross-category question always gets relevant chunks from all three.
+# Each category gets its own top_k allocation so no category can crowd
+# out another regardless of how many chunks each contains.
+# Laws get more slots (10) since the legal corpus is larger than SOPs/clients.
 class MultiCategoryRetriever:
-    def __init__(self, index, top_k_per_category=10):
+    def __init__(self, index):
         self.retrievers = {
             "law": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=top_k_per_category,
+                similarity_top_k=10,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="law")
                 ])
             ),
             "sop": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=top_k_per_category,
+                similarity_top_k=5,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="sop")
                 ])
             ),
             "client": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=top_k_per_category,
+                similarity_top_k=5,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="client")
                 ])
@@ -98,8 +105,8 @@ class MultiCategoryRetriever:
         }
 
     def retrieve(self, query_str):
-        # Query all three categories and combine results.
-        # 5 chunks per category = 15 total chunks sent to the LLM.
+        # Query all three categories and combine.
+        # Total chunks per query: up to 20 (10 law + 5 sop + 5 client).
         all_nodes = []
         for category, retriever in self.retrievers.items():
             try:
@@ -111,8 +118,8 @@ class MultiCategoryRetriever:
 
 
 # --- INDEX LOADER ---
-# Loads ChromaDB index once and caches it for the session.
-# All conversations share the same index — only the query engines differ.
+# Loads ChromaDB index once and caches for the session.
+# All conversations share the same index.
 @st.cache_resource
 def load_index():
     embed_model = OllamaEmbedding(model_name="nomic-embed-text")
@@ -128,9 +135,9 @@ def load_index():
 
 # --- QUERY ENGINE FACTORY ---
 # Creates a RetrieverQueryEngine using the MultiCategoryRetriever.
+# Uses tree_summarize for a single LLM call per query — faster and
+# more reliable than refine mode on a small model.
 # Each conversation gets its own engine instance so they stay independent.
-# We use tree_summarize for a single LLM call per query — faster and
-# more memory-efficient than the default refine mode on 8GB.
 def create_query_engine(index):
     llm = Ollama(
         model="llama3.2:3b",
@@ -140,7 +147,7 @@ def create_query_engine(index):
         system_prompt=SYSTEM_PROMPT
     )
 
-    retriever = MultiCategoryRetriever(index, top_k_per_category=5)
+    retriever = MultiCategoryRetriever(index)
 
     return RetrieverQueryEngine.from_args(
         retriever=retriever,
@@ -153,14 +160,14 @@ def create_query_engine(index):
 
 
 # --- CHAT MEMORY ---
-# Instead of relying on the chat engine to manage memory,
-# we inject the last few exchanges directly into each prompt.
-# This is more reliable with small models because it avoids
-# the condensation step that confuses llama3.2:3b.
-# We keep the last 3 exchanges (6 messages) to stay within
-# the 3072 token context window comfortably.
-def build_prompt_with_history(prompt, messages, max_exchanges=3):
-    # Grab the last N user/assistant pairs (excluding the current message)
+# Injects the last 2 exchanges (4 messages) into each prompt.
+# Kept at 2 exchanges to avoid injecting too much history into the
+# small context window — enough for follow-up questions without
+# polluting the context with stale information.
+# Each message is truncated to 300 characters to protect the
+# context window from very long previous answers.
+def build_prompt_with_history(prompt, messages, max_exchanges=2):
+    # Take only the last N exchanges from history
     recent = messages[-(max_exchanges * 2):]
 
     if not recent:
@@ -169,8 +176,10 @@ def build_prompt_with_history(prompt, messages, max_exchanges=3):
     history_str = ""
     for msg in recent:
         role = "User" if msg["role"] == "user" else "Assistant"
-        # Truncate long messages to avoid blowing the context window
-        content = msg["content"][:300] + "..." if len(msg["content"]) > 300 else msg["content"]
+        content = msg["content"]
+        # Truncate long messages to avoid consuming the context window
+        if len(content) > 300:
+            content = content[:300] + "..."
         history_str += f"{role}: {content}\n"
 
     return f"""Previous conversation:
@@ -179,6 +188,8 @@ Current question: {prompt}"""
 
 
 # --- NEW CONVERSATION ---
+# Creates a fresh conversation with its own query engine and empty message list.
+# UUID ensures each conversation has a unique identifier.
 def new_conversation(index):
     conv_id = str(uuid.uuid4())
     st.session_state.conversations[conv_id] = {
@@ -193,17 +204,20 @@ def new_conversation(index):
 try:
     index = load_index()
 except Exception as e:
-    st.error(f"Failed to load index. Have you run `python ingest.py` first?\n\nError: {e}")
+    st.error(
+        f"Failed to load index. Have you run `python ingest.py` first?\n\nError: {e}"
+    )
     st.stop()
 
 
-# --- SESSION STATE ---
+# --- SESSION STATE INITIALISATION ---
 if "conversations" not in st.session_state:
     st.session_state.conversations = {}
 
 if "active_conv_id" not in st.session_state:
     st.session_state.active_conv_id = None
 
+# Always ensure at least one conversation exists
 if not st.session_state.conversations:
     new_conversation(index)
 
@@ -224,6 +238,7 @@ with st.sidebar:
 
     st.divider()
 
+    # List conversations newest first
     for conv_id in reversed(list(st.session_state.conversations.keys())):
         conv = st.session_state.conversations[conv_id]
         is_active = conv_id == st.session_state.active_conv_id
@@ -269,9 +284,11 @@ for msg in active_conv["messages"]:
 # Chat input
 if prompt := st.chat_input("Ask a question about firm procedures or Ontario law..."):
 
-    # Auto-name conversation from first message
+    # Auto-name the conversation from the first message
     if len(active_conv["messages"]) == 0:
-        active_conv["name"] = prompt[:35] + "..." if len(prompt) > 35 else prompt
+        active_conv["name"] = (
+            prompt[:35] + "..." if len(prompt) > 35 else prompt
+        )
 
     active_conv["messages"].append({"role": "user", "content": prompt})
 
@@ -281,18 +298,19 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
     with st.chat_message("assistant"):
         with st.spinner("Searching documents and generating response..."):
 
-            # Inject recent chat history into the prompt before querying.
-            # This gives the model memory of the conversation without
-            # relying on the chat engine's condensation step.
+            # Inject last 2 exchanges of history into the prompt.
+            # Excludes the message just appended so we don't inject
+            # the current question as its own history.
             augmented_prompt = build_prompt_with_history(
                 prompt,
-                active_conv["messages"][:-1]  # exclude the message just appended
+                active_conv["messages"][:-1],
+                max_exchanges=2
             )
 
             response = query_engine.query(augmented_prompt)
             answer = str(response)
 
-            # Extract source filenames from retrieved nodes
+            # Extract unique source filenames from retrieved chunks
             sources = list({
                 node.metadata.get("file_name", "Unknown")
                 for node in response.source_nodes
@@ -301,7 +319,10 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
             st.markdown(answer)
             if sources:
                 st.caption(f"📎 Sources: {', '.join(sources)}")
-            st.caption("⚠️ AI-assisted research only. Must be reviewed by a licensed lawyer.")
+            st.caption(
+                "⚠️ AI-assisted research only. "
+                "Must be reviewed by a licensed lawyer."
+            )
 
     active_conv["messages"].append({
         "role": "assistant",

@@ -50,7 +50,7 @@ crowd out smaller SOP and client file content.
 ```
 documents/
 ├── laws/
-│   └── Limitations Act, 2002, S.O. 2002, c. 24, Sched. B _ ontario.ca.pdf
+│   └── limitations_act_2002.txt
 ├── sops/
 │   └── sop_002_limitation_period_management.txt
 └── clients/
@@ -297,7 +297,7 @@ for f in files:
   when multiple documents are in context simultaneously
 - The model sometimes provides correct answers with fabricated reasoning
 - Response times are 10–30 seconds depending on query complexity
-- Context window capped at 6,144 tokens to avoid OOM on 8GB
+- Context window capped at 6,500 tokens to avoid OOM on 8GB
 - No chat history — each question must be self-contained
 
 These are expected at PoC scale and are addressed in the production build.
@@ -312,7 +312,7 @@ The production system replaces the PoC components as follows:
 |---|---|---|
 | Hardware | MacBook Pro M3 8GB | 4× A100 80GB workstation |
 | LLM | llama3.2:3b | Nemotron Ultra 253B |
-| Context window | 6,144 tokens | 32,768+ tokens |
+| Context window | 6,500 tokens | 32,768+ tokens |
 | Document corpus | 3 documents | Hundreds of files + CanLII API |
 | Case law | Not included | Live via CanLII API |
 | Authentication | Hardcoded credentials | SSO with MFA |

@@ -1,8 +1,8 @@
 # Legal AI RAG System — Local PoC
 
 A fully local Retrieval-Augmented Generation (RAG) system that lets you
-query a knowledge base of legal documents, firm SOPs, and case files using
-a locally hosted LLM. No data leaves your machine.
+query a focused knowledge base of legal documents, firm SOPs, and case
+files using a locally hosted LLM. No data leaves your machine.
 
 Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai),
 [ChromaDB](https://www.trychroma.com), and [Streamlit](https://streamlit.io).
@@ -11,11 +11,12 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
 
 ## How it works
 
-1. Documents are parsed, chunked, and embedded into a local vector database (ChromaDB)
-2. When you ask a question, a multi-category query router searches laws, SOPs,
-   and client files independently, then combines the results
-3. Those combined results are passed to a local LLM (llama3.2:3b) along with
-   recent conversation history for context-aware answers
+1. Documents are parsed, split into 150-token chunks, embedded, and stored
+   in a local vector database (ChromaDB)
+2. When you ask a question, a multi-category retriever searches legislation,
+   SOPs, and client files independently and combines the results
+3. Up to 30 retrieved chunks are passed to a local LLM within a 6,144 token
+   context window
 4. The LLM generates a cited answer grounded in your documents
 5. Nothing is sent to any external API or service
 
@@ -24,22 +25,40 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
 ## Architecture
 
 ```
-Your question + recent chat history
+Your question
 ↓
-Multi-category query router
+Multi-category retriever
 ↓
-┌─────────────┬─────────────┬──────────────┐
-│  Laws (x10) │  SOPs (x5)  │ Clients (x5) │
-└─────────────┴─────────────┴──────────────┘
+┌──────────────┬──────────────┬───────────────┐
+│  Laws (×12)  │  SOPs (×10)  │ Clients (×8)  │
+└──────────────┴──────────────┴───────────────┘
 ↓
-Combined results (up to 20 chunks)
+Up to 30 chunks × 150 tokens = 4,500 tokens of content
 ↓
-LLM generates cited answer
+llama3.2:3b (6,500 token context window)
+↓
+Cited answer
 ```
 
-Each category is searched independently so no category can crowd out another.
-A question spanning multiple categories (e.g. legislation + SOP + client file)
-gets fair representation from all three.
+Each category is searched independently so large legislation PDFs cannot
+crowd out smaller SOP and client file content.
+
+---
+
+## Current document corpus
+
+```
+documents/
+├── laws/
+│   └── Limitations Act, 2002, S.O. 2002, c. 24, Sched. B _ ontario.ca.pdf
+├── sops/
+│   └── sop_002_limitation_period_management.txt
+└── clients/
+└── case_margaret_chen.txt
+```
+These three documents are tightly interconnected — the Limitations Act
+drives the urgency of the client file, and SOP-002 governs the required
+response procedure.
 
 ---
 
@@ -89,30 +108,18 @@ pip install -r requirements.txt
 
 ### 4. Add your documents
 
-Add your `.txt`, `.pdf`, or `.docx` files to the documents folder.
-The folder is not committed to the repo — create it locally:
+The documents folder is not committed to the repo. Create it locally:
 
 ```bash
 mkdir -p documents/laws documents/sops documents/clients
 ```
 
-Subfolders under `laws/` are supported and recommended:
-
-```
-documents/
-├── laws/
-│   ├── federal/        ← Federal legislation
-│   └── ontario/        ← Ontario statutes and regulations
-├── sops/               ← Firm procedures and standards
-└── clients/            ← Case files
-```
+Add your files to the correct subfolders. The ingestion pipeline
+automatically tags documents by category based on subfolder name.
 
 > PDFs must be digital (text-selectable), not scanned images.
-> To test, try highlighting and copying text in Preview.
+> Test by trying to highlight and copy text in Preview.
 > If you cannot select text, the PDF cannot be parsed.
-
-The ingestion pipeline automatically tags documents by category based on
-which subfolder they live in. This powers the multi-category query router.
 
 ### 5. Index your documents
 
@@ -122,14 +129,16 @@ Ollama must be running before ingestion. Then:
 python ingest.py
 ```
 
-This may take several minutes depending on the size of your document library.
-Re-run any time you add or update documents — delete `chroma_db/` first
-to force a full re-index:
+Re-run any time you add or update documents. Always delete
+`chroma_db/` first to force a clean re-index:
 
 ```bash
 rm -rf chroma_db/
 python ingest.py
 ```
+
+> If you change the embedding model, you must delete chroma_db/ and
+> re-ingest. Vectors from different models are incompatible.
 
 ---
 
@@ -147,20 +156,18 @@ source venv/bin/activate
 streamlit run app.py
 ```
 
-The app will open automatically at `http://localhost:8501`.
+The app opens automatically at `http://localhost:8501`.
 
-> If you are using VS Code, the virtual environment activates automatically
-> when you open a new terminal in the project folder.
+> VS Code auto-activates the venv when you open a new terminal
+> in the project folder — no need to run activate manually.
 
 ---
 
 ## Login
 
-The app requires a username and password. Default credentials:
-
-| Username | Password  |
-|----------|-----------|
-| admin    | legal123  |
+| Username | Password |
+|----------|----------|
+| admin    | legal123 |
 
 To add or change credentials, update the `CREDENTIALS` dictionary in `app.py`.
 
@@ -169,25 +176,39 @@ To add or change credentials, update the `CREDENTIALS` dictionary in `app.py`.
 ## Features
 
 **Multi-conversation sidebar**
-- Create multiple independent chat sessions
-- Each conversation maintains its own context and history
-- Conversations are auto-named from the first message
-- Delete individual conversations or clear all
-
-**Chat memory**
-- The last 3 exchanges are injected into each prompt
-- Follow-up questions work without repeating context
-- e.g. "What is the limitation period for his tort claim?" after
-  asking about a specific client
+Create, switch between, and delete independent chat sessions.
+Each conversation is auto-named from the first message.
 
 **Multi-category query router**
-- Laws, SOPs, and client files are searched independently
-- Results are combined before being sent to the LLM
-- Cross-category questions work reliably
+Legislation, SOPs, and client files are searched independently on every
+query — no category can crowd out another regardless of document size.
 
 **Source citations**
-- Every response shows which documents were retrieved
-- Helps verify the answer is grounded in your documents
+Every response shows which documents were retrieved, making it easy to
+verify answers against source material.
+
+**No chat history**
+Each question is treated as self-contained. The full 6,144 token context
+window is reserved for document content, maximising what the LLM can see
+per query and avoiding stale context from previous exchanges.
+
+**Login screen**
+Username and password required on every session.
+
+---
+
+## Optimised retrieval settings
+
+| Setting | Value | Reason |
+|---|---|---|
+| Chunk size | 100 tokens | Isolates individual sections into dedicated chunks |
+| Chunk overlap | 15 tokens | Preserves context at chunk boundaries |
+| Context window | 6,1500 tokens | Safe ceiling for 8GB unified memory |
+| Law top_k | 20 | Large PDFs need more retrieval slots |
+| SOP top_k | 18 | Covers nearly all of a medium SOP document |
+| Client top_k | 14 | Covers virtually the entire client file |
+| Embedding model | nomic-embed-text | 274MB, 768 dimensions, 2048 token limit |
+| LLM | llama3.2:3b | ~2GB, fits comfortably within 8GB |
 
 ---
 
@@ -203,15 +224,17 @@ local-legal-RAG-system/
 └── README.md
 ```
 
-> `chroma_db/` and `venv/` are excluded from version control via `.gitignore`.
-> `documents/` is also excluded — add your own files locally after cloning.
-> Run `ingest.py` after cloning to build the vector database locally.
+> `chroma_db/` and `venv/` are gitignored — regenerate locally after cloning.
+> `documents/` is gitignored — add your own files after cloning.
 
 ---
 
 ## Git workflow
+
+```
 main    ← stable, always working
 dev     ← active development
+```
 
 ```bash
 # Daily work on dev
@@ -232,10 +255,10 @@ git checkout dev
 ## Venv reference
 
 | Command | When to use |
-|---------|-------------|
-| `source venv/bin/activate` | Start of every session |
+|---|---|
+| `source venv/bin/activate` | Start of every working session |
 | `deactivate` | When you are done working |
-| `pip install -r requirements.txt` | First time setup, or after pulling changes that update requirements.txt |
+| `pip install -r requirements.txt` | First-time setup, or after pulling changes that update requirements.txt |
 | `pip freeze > requirements.txt` | After installing any new package |
 
 ---
@@ -261,30 +284,46 @@ for f in files:
 | Error | Cause | Fix |
 |---|---|---|
 | `ConnectionError: Failed to connect to Ollama` | Ollama not running | Run `ollama serve` in a separate terminal |
-| `Empty response` | Document not indexed | Re-run `python ingest.py` |
 | `ModuleNotFoundError` | Venv not active | Run `source venv/bin/activate` |
-| `the input length exceeds context length` | Chunk too large | Already handled by SentenceSplitter in ingest.py |
-| Garbled text in responses | PDF encoding issue | Already handled by pymupdf in ingest.py |
+| `input length exceeds context length` | Chunk too large for embedding model | Reduce `chunk_size` in `ingest.py` |
+| Garbled text in responses | PDF encoding issue | Already handled by pymupdf |
+| Empty or wrong answers | Document not indexed | Run `rm -rf chroma_db/ && python ingest.py` |
 
 ---
 
 ## Known limitations (PoC)
 
-- `llama3.2:3b` struggles to independently identify applicable legislation
-  from plain-language case files — a model size limitation
-- The model occasionally hallucinates citations or section numbers
+- `llama3.2:3b` occasionally confuses section numbers between documents
+  when multiple documents are in context simultaneously
+- The model sometimes provides correct answers with fabricated reasoning
 - Response times are 10–30 seconds depending on query complexity
-- Context window is capped at 3,072 tokens to avoid OOM crashes on 8GB
+- Context window capped at 6,144 tokens to avoid OOM on 8GB
+- No chat history — each question must be self-contained
 
-These are expected at PoC scale. The production deployment uses a larger
-model on dedicated hardware which addresses all of the above.
+These are expected at PoC scale and are addressed in the production build.
+
+---
+
+## Production roadmap
+
+The production system replaces the PoC components as follows:
+
+| Component | PoC | Production |
+|---|---|---|
+| Hardware | MacBook Pro M3 8GB | 4× A100 80GB workstation |
+| LLM | llama3.2:3b | Nemotron Ultra 253B |
+| Context window | 6,144 tokens | 32,768+ tokens |
+| Document corpus | 3 documents | Hundreds of files + CanLII API |
+| Case law | Not included | Live via CanLII API |
+| Authentication | Hardcoded credentials | SSO with MFA |
+| Deployment | Local Streamlit | Air-gapped on-premise server |
 
 ---
 
 ## Notes
 
-- Model: `llama3.2:3b` — approximately 2GB download, runs on 8GB unified memory
 - Ollama must be running before launching the app or running ingestion
-- This is a proof-of-concept. Do not use with real regulated data (PHI, PII,
-  client files) without a production-grade, air-gapped deployment
-- All AI responses should be reviewed by a licensed lawyer before being acted upon
+- This is a proof-of-concept. Do not use with real regulated data (PHI,
+  PII, client files) without a production-grade, air-gapped deployment
+- All AI responses must be reviewed by a licensed lawyer before being
+  acted upon

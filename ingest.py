@@ -1,6 +1,6 @@
-# ingest.py — Document ingestion pipeline with category tagging
+# ingest.py — Document ingestion pipeline
 # Run this once after adding or updating documents.
-# Re-running will re-index everything from scratch.
+# Delete chroma_db/ and re-run if you change the embedding model or chunk size.
 
 import os
 import fitz  # pymupdf
@@ -21,8 +21,9 @@ for root, dirs, files in os.walk("./documents"):
         filepath = os.path.join(root, filename)
         ext = os.path.splitext(filename)[1].lower()
 
-        # Determine category based on which subfolder the file lives in.
-        # This is used later for per-category retrieval in the query router.
+        # Tag each document by category based on subfolder.
+        # Used by the multi-category retriever in app.py to ensure
+        # each category gets fair representation on every query.
         if "clients" in filepath:
             category = "client"
         elif "sops" in filepath:
@@ -34,7 +35,7 @@ for root, dirs, files in os.walk("./documents"):
 
         try:
             if ext == ".pdf":
-                # Use pymupdf for robust PDF text extraction.
+                # pymupdf extracts clean text from digital PDFs.
                 # Handles complex encoding that pypdf cannot.
                 doc = fitz.open(filepath)
                 text = ""
@@ -43,11 +44,12 @@ for root, dirs, files in os.walk("./documents"):
                 doc.close()
 
                 if text.strip():
+                    # Only file_name and category stored in metadata.
+                    # file_path excluded to prevent it leaking into responses.
                     documents.append(Document(
                         text=text,
                         metadata={
                             "file_name": filename,
-                            "file_path": filepath,
                             "category": category
                         }
                     ))
@@ -55,15 +57,16 @@ for root, dirs, files in os.walk("./documents"):
                     print(f"⚠️  No text extracted from {filename} — skipping")
 
             elif ext in [".txt", ".docx"]:
-                # Use SimpleDirectoryReader for plain text and Word docs.
                 from llama_index.core import SimpleDirectoryReader
                 docs = SimpleDirectoryReader(
                     input_files=[filepath]
                 ).load_data()
                 for d in docs:
-                    d.metadata["file_name"] = filename
-                    d.metadata["file_path"] = filepath
-                    d.metadata["category"] = category
+                    # Only store file_name and category — no file_path.
+                    d.metadata = {
+                        "file_name": filename,
+                        "category": category
+                    }
                 documents.extend(docs)
 
         except Exception as e:
@@ -79,37 +82,36 @@ print(f"   Categories: "
 # --- STEP 2: SET UP VECTOR STORE ---
 print("🔢 Setting up vector store...")
 
-# nomic-embed-text runs locally via Ollama — no internet required.
-# Must use the same model here and in app.py — mixing models breaks search.
+# nomic-embed-text: 2048 token context limit, 768-dimension vectors.
+# Must match the embedding model used in app.py — mixing models
+# produces garbage retrieval results.
 embed_model = OllamaEmbedding(model_name="nomic-embed-text")
 
-# Connect to ChromaDB on disk. PersistentClient survives after the script ends.
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
-
-# get_or_create_collection: connect if exists, create fresh if not.
 chroma_collection = chroma_client.get_or_create_collection("legal_docs")
-
-# Bridge between LlamaIndex and ChromaDB.
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-
-# Tell LlamaIndex to store vectors in ChromaDB rather than in-memory.
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
 
 # --- STEP 3: CHUNK, EMBED, AND INDEX ---
-print("⚙️  Embedding and indexing (this may take several minutes)...")
+print("⚙️  Embedding and indexing (this may take a few minutes)...")
 
-# SentenceSplitter breaks each document into overlapping chunks before embedding.
-# chunk_size=512: max tokens per chunk — stays within nomic-embed-text's limit.
-# chunk_overlap=50: consecutive chunks share 50 tokens so answers aren't
-# cut off at chunk boundaries.
+# chunk_size=100: small enough to isolate individual SOP sections and
+# legislative provisions into their own chunks, enabling precise retrieval.
+# At 100 tokens, each numbered section (e.g. s.3.3, s.4.2) typically
+# gets its own dedicated chunk rather than sharing with adjacent sections.
+#
+# chunk_overlap=15: small overlap preserves context at chunk boundaries
+# without wasting significant token budget.
+#
+# nomic-embed-text has a 2048 token limit — 100 tokens is well within it.
 index = VectorStoreIndex.from_documents(
     documents,
     storage_context=storage_context,
     embed_model=embed_model,
     transformations=[SentenceSplitter(
-        chunk_size=512,
-        chunk_overlap=50
+        chunk_size=100,
+        chunk_overlap=15
     )],
     show_progress=True
 )

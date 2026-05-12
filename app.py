@@ -1,4 +1,6 @@
-# app.py — Legal AI Assistant with multi-category query router and chat memory
+# app.py — Legal AI Assistant
+# 3-document focused corpus: Margaret Chen, Limitations Act, SOP-002
+# Embedding: nomic-embed-text | Chunk size: 150 | Context window: 6144
 
 import uuid
 import streamlit as st
@@ -21,7 +23,6 @@ st.set_page_config(
 
 
 # --- CREDENTIALS ---
-# Hardcoded for PoC only. Never do this in production.
 CREDENTIALS = {
     "admin": "legal123",
 }
@@ -30,6 +31,7 @@ def check_login(username, password):
     return CREDENTIALS.get(username) == password
 
 
+# --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = """You are a legal research assistant for a law firm.
 Answer questions using ONLY the documents provided in your context.
 Always cite which document your answer comes from, including the section number.
@@ -41,15 +43,13 @@ provide it directly and completely.
 Never say a document is not in your context if its filename appears in your sources.
 Never reference people, cases, or documents not present in your current sources.
 If a case file is in your sources, summarise it fully and accurately.
-Only add a review disclaimer at the end.
 When a case file contains the word URGENT or mentions days remaining
 to a limitation period, always lead your answer with that information
-before anything else."""
+before anything else.
+Only add a review disclaimer at the end."""
 
 
 # --- LOGIN GATE ---
-# Renders the login form and blocks the rest of the app until authenticated.
-# session_state.logged_in persists for the duration of the browser session.
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -74,30 +74,38 @@ if not st.session_state.logged_in:
 
 
 # --- MULTI-CATEGORY RETRIEVER ---
-# Searches laws, SOPs, and client files independently and combines results.
-# Each category gets its own top_k allocation so no category can crowd
-# out another regardless of how many chunks each contains.
-# Laws get more slots (10) since the legal corpus is larger than SOPs/clients.
+# Even with 3 documents, the Limitations Act PDF contains hundreds of
+# chunks that would dominate a single retriever. Per-category allocation
+# guarantees the SOP and client file always reach the LLM.
+#
+# Token budget: 30 chunks × 150 tokens = 4,500 tokens of content
+# + 170 system/question + 1,474 answer headroom = 6,144 context window
 class MultiCategoryRetriever:
     def __init__(self, index):
         self.retrievers = {
+            # Law: Limitations Act PDF is large — 12 slots retrieves
+            # the most relevant legislative provisions per query.
             "law": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=10,
+                similarity_top_k=20,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="law")
                 ])
             ),
+            # SOP: SOP-002 is a medium document — 10 slots covers
+            # nearly the entire document, ensuring no procedure is missed.
             "sop": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=5,
+                similarity_top_k=18,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="sop")
                 ])
             ),
+            # Client: Margaret Chen's file is small — 8 slots covers
+            # virtually the entire case file on every query.
             "client": VectorIndexRetriever(
                 index=index,
-                similarity_top_k=5,
+                similarity_top_k=14,
                 filters=MetadataFilters(filters=[
                     ExactMatchFilter(key="category", value="client")
                 ])
@@ -105,8 +113,8 @@ class MultiCategoryRetriever:
         }
 
     def retrieve(self, query_str):
-        # Query all three categories and combine.
-        # Total chunks per query: up to 20 (10 law + 5 sop + 5 client).
+        # Query all three categories simultaneously and combine.
+        # Total: up to 30 chunks (12 law + 10 sop + 8 client).
         all_nodes = []
         for category, retriever in self.retrievers.items():
             try:
@@ -118,10 +126,9 @@ class MultiCategoryRetriever:
 
 
 # --- INDEX LOADER ---
-# Loads ChromaDB index once and caches for the session.
-# All conversations share the same index.
 @st.cache_resource
 def load_index():
+    # Must match the embedding model used in ingest.py.
     embed_model = OllamaEmbedding(model_name="nomic-embed-text")
     chroma_client = chromadb.PersistentClient(path="./chroma_db")
     collection = chroma_client.get_or_create_collection("legal_docs")
@@ -134,15 +141,18 @@ def load_index():
 
 
 # --- QUERY ENGINE FACTORY ---
-# Creates a RetrieverQueryEngine using the MultiCategoryRetriever.
-# Uses tree_summarize for a single LLM call per query — faster and
-# more reliable than refine mode on a small model.
-# Each conversation gets its own engine instance so they stay independent.
+# context_window=6500: optimal ceiling for 8GB unified memory.
+# Fits 30 chunks × 150 tokens = 4,500 tokens of content plus
+# system prompt, question, and ~1,474 tokens of answer headroom.
+# tree_summarize: single LLM call — faster and more reliable
+# than refine mode on a 3B model.
+# Chat history disabled: entire context window reserved for
+# document content, maximising what the LLM can see per query.
 def create_query_engine(index):
     llm = Ollama(
         model="llama3.2:3b",
         request_timeout=180.0,
-        context_window=3072,
+        context_window=6500,
         keep_alive="60m",
         system_prompt=SYSTEM_PROMPT
     )
@@ -159,37 +169,7 @@ def create_query_engine(index):
     )
 
 
-# --- CHAT MEMORY ---
-# Injects the last 2 exchanges (4 messages) into each prompt.
-# Kept at 2 exchanges to avoid injecting too much history into the
-# small context window — enough for follow-up questions without
-# polluting the context with stale information.
-# Each message is truncated to 300 characters to protect the
-# context window from very long previous answers.
-def build_prompt_with_history(prompt, messages, max_exchanges=2):
-    # Take only the last N exchanges from history
-    recent = messages[-(max_exchanges * 2):]
-
-    if not recent:
-        return prompt
-
-    history_str = ""
-    for msg in recent:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"]
-        # Truncate long messages to avoid consuming the context window
-        if len(content) > 300:
-            content = content[:300] + "..."
-        history_str += f"{role}: {content}\n"
-
-    return f"""Previous conversation:
-{history_str}
-Current question: {prompt}"""
-
-
 # --- NEW CONVERSATION ---
-# Creates a fresh conversation with its own query engine and empty message list.
-# UUID ensures each conversation has a unique identifier.
 def new_conversation(index):
     conv_id = str(uuid.uuid4())
     st.session_state.conversations[conv_id] = {
@@ -210,14 +190,13 @@ except Exception as e:
     st.stop()
 
 
-# --- SESSION STATE INITIALISATION ---
+# --- SESSION STATE ---
 if "conversations" not in st.session_state:
     st.session_state.conversations = {}
 
 if "active_conv_id" not in st.session_state:
     st.session_state.active_conv_id = None
 
-# Always ensure at least one conversation exists
 if not st.session_state.conversations:
     new_conversation(index)
 
@@ -238,7 +217,6 @@ with st.sidebar:
 
     st.divider()
 
-    # List conversations newest first
     for conv_id in reversed(list(st.session_state.conversations.keys())):
         conv = st.session_state.conversations[conv_id]
         is_active = conv_id == st.session_state.active_conv_id
@@ -274,17 +252,14 @@ st.caption("🔒 Fully local — no data leaves this machine")
 active_conv = st.session_state.conversations[st.session_state.active_conv_id]
 query_engine = active_conv["engine"]
 
-# Replay message history for this conversation
 for msg in active_conv["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "sources" in msg and msg["sources"]:
             st.caption(f"📎 Sources: {', '.join(msg['sources'])}")
 
-# Chat input
 if prompt := st.chat_input("Ask a question about firm procedures or Ontario law..."):
 
-    # Auto-name the conversation from the first message
     if len(active_conv["messages"]) == 0:
         active_conv["name"] = (
             prompt[:35] + "..." if len(prompt) > 35 else prompt
@@ -298,19 +273,11 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
     with st.chat_message("assistant"):
         with st.spinner("Searching documents and generating response..."):
 
-            # Inject last 2 exchanges of history into the prompt.
-            # Excludes the message just appended so we don't inject
-            # the current question as its own history.
-            augmented_prompt = build_prompt_with_history(
-                prompt,
-                active_conv["messages"][:-1],
-                max_exchanges=2
-            )
-
-            response = query_engine.query(augmented_prompt)
+            # Direct query — no history injection.
+            # Full 6,144 token context window available for document content.
+            response = query_engine.query(prompt)
             answer = str(response)
 
-            # Extract unique source filenames from retrieved chunks
             sources = list({
                 node.metadata.get("file_name", "Unknown")
                 for node in response.source_nodes

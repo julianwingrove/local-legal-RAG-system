@@ -1,6 +1,6 @@
 # app.py — Legal AI Assistant
 # 3-document focused corpus: Margaret Chen, Limitations Act, SOP-002
-# Embedding: nomic-embed-text | Chunk size: 150 | Context window: 6500
+# Embedding: nomic-embed-text | Chunk size: 100 | Context window: 6500
 
 import uuid
 import streamlit as st
@@ -78,7 +78,7 @@ if not st.session_state.logged_in:
 # chunks that would dominate a single retriever. Per-category allocation
 # guarantees the SOP and client file always reach the LLM.
 #
-# Token budget: 30 chunks × 150 tokens = 4,500 tokens of content
+# Token budget: 30 chunks × 100 tokens = 3,000 tokens of content
 # + 170 system/question + 1,474 answer headroom = 6,500 context window
 class MultiCategoryRetriever:
     def __init__(self, index):
@@ -142,7 +142,7 @@ def load_index():
 
 # --- QUERY ENGINE FACTORY ---
 # context_window=6500: optimal ceiling for 8GB unified memory.
-# Fits 30 chunks × 150 tokens = 4,500 tokens of content plus
+# Fits 30 chunks × 100 tokens = 3,000 tokens of content plus
 # system prompt, question, and ~1,474 tokens of answer headroom.
 # tree_summarize: single LLM call — faster and more reliable
 # than refine mode on a 3B model.

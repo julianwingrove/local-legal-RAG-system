@@ -11,7 +11,7 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
 
 ## How it works
 
-1. Documents are parsed, split into 150-token chunks, embedded, and stored
+1. Documents are parsed, split into 100-token chunks, embedded, and stored
    in a local vector database (ChromaDB)
 2. When you ask a question, a multi-category retriever searches legislation,
    SOPs, and client files independently and combines the results
@@ -33,7 +33,7 @@ Multi-category retriever
 │  Laws (×12)  │  SOPs (×10)  │ Clients (×8)  │
 └──────────────┴──────────────┴───────────────┘
 ↓
-Up to 30 chunks × 150 tokens = 4,500 tokens of content
+Up to 30 chunks × 100 tokens = 3,000 tokens of content
 ↓
 llama3.2:3b (6500 token context window)
 ↓

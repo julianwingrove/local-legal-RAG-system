@@ -15,7 +15,7 @@ Built with [Ollama](https://ollama.com), [LlamaIndex](https://www.llamaindex.ai)
    in a local vector database (ChromaDB)
 2. When you ask a question, a multi-category retriever searches legislation,
    SOPs, and client files independently and combines the results
-3. Up to 30 retrieved chunks are passed to a local LLM within a 6,144 token
+3. Up to 30 retrieved chunks are passed to a local LLM within a 6,500 token
    context window
 4. The LLM generates a cited answer grounded in your documents
 5. Nothing is sent to any external API or service
@@ -35,7 +35,7 @@ Multi-category retriever
 ↓
 Up to 30 chunks × 150 tokens = 4,500 tokens of content
 ↓
-llama3.2:3b (6,500 token context window)
+llama3.2:3b (6500 token context window)
 ↓
 Cited answer
 ```
@@ -188,7 +188,7 @@ Every response shows which documents were retrieved, making it easy to
 verify answers against source material.
 
 **No chat history**
-Each question is treated as self-contained. The full 6,144 token context
+Each question is treated as self-contained. The full 6,500 token context
 window is reserved for document content, maximising what the LLM can see
 per query and avoiding stale context from previous exchanges.
 
@@ -203,7 +203,7 @@ Username and password required on every session.
 |---|---|---|
 | Chunk size | 100 tokens | Isolates individual sections into dedicated chunks |
 | Chunk overlap | 15 tokens | Preserves context at chunk boundaries |
-| Context window | 6,1500 tokens | Safe ceiling for 8GB unified memory |
+| Context window | 6,500 tokens | Safe ceiling for 8GB unified memory |
 | Law top_k | 20 | Large PDFs need more retrieval slots |
 | SOP top_k | 18 | Covers nearly all of a medium SOP document |
 | Client top_k | 14 | Covers virtually the entire client file |
@@ -297,7 +297,7 @@ for f in files:
   when multiple documents are in context simultaneously
 - The model sometimes provides correct answers with fabricated reasoning
 - Response times are 10–30 seconds depending on query complexity
-- Context window capped at 6,500 tokens to avoid OOM on 8GB
+- Context window capped at 6500 tokens to avoid OOM on 8GB
 - No chat history — each question must be self-contained
 
 These are expected at PoC scale and are addressed in the production build.
@@ -312,7 +312,7 @@ The production system replaces the PoC components as follows:
 |---|---|---|
 | Hardware | MacBook Pro M3 8GB | 4× A100 80GB workstation |
 | LLM | llama3.2:3b | Nemotron Ultra 253B |
-| Context window | 6,500 tokens | 32,768+ tokens |
+| Context window | 6500 tokens | 32,768+ tokens |
 | Document corpus | 3 documents | Hundreds of files + CanLII API |
 | Case law | Not included | Live via CanLII API |
 | Authentication | Hardcoded credentials | SSO with MFA |

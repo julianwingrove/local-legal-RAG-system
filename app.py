@@ -1,6 +1,6 @@
 # app.py — Legal AI Assistant
 # 3-document focused corpus: Margaret Chen, Limitations Act, SOP-002
-# Embedding: nomic-embed-text | Chunk size: 150 | Context window: 6144
+# Embedding: nomic-embed-text | Chunk size: 150 | Context window: 6500
 
 import uuid
 import streamlit as st
@@ -79,7 +79,7 @@ if not st.session_state.logged_in:
 # guarantees the SOP and client file always reach the LLM.
 #
 # Token budget: 30 chunks × 150 tokens = 4,500 tokens of content
-# + 170 system/question + 1,474 answer headroom = 6,144 context window
+# + 170 system/question + 1,474 answer headroom = 6,500 context window
 class MultiCategoryRetriever:
     def __init__(self, index):
         self.retrievers = {
@@ -274,7 +274,7 @@ if prompt := st.chat_input("Ask a question about firm procedures or Ontario law.
         with st.spinner("Searching documents and generating response..."):
 
             # Direct query — no history injection.
-            # Full 6,144 token context window available for document content.
+            # Full 6,500 token context window available for document content.
             response = query_engine.query(prompt)
             answer = str(response)
 

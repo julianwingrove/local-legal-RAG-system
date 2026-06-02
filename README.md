@@ -310,8 +310,9 @@ The production system replaces the PoC components as follows:
 
 | Component | PoC | Production |
 |---|---|---|
-| Hardware | MacBook Pro M3 8GB | 4× A100 80GB workstation |
-| LLM | llama3.2:3b | Nemotron Ultra 253B |
+| Hardware | MacBook Pro M3 8GB | DGX Spark |
+| LLM | llama3.2:3b | Nemotron 3 Super 120B |
+| Embedding Model | nomic-embed-text | NV-Embed-v2 |
 | Context window | 6500 tokens | 32,768+ tokens |
 | Document corpus | 3 documents | Hundreds of files + CanLII API |
 | Case law | Not included | Live via CanLII API |
